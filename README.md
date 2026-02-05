@@ -1,6 +1,6 @@
-# NIfTI Volume Resampling: Isotropic to Anisotropic
+# NIfTI 3D Volume Resampling: Isotropic to Anisotropic or 'any'tropic
 
-Tools for resampling MRI NIfTI volumes from 100 micron isotropic spacing to 100×100×150 micron anisotropic spacing.
+Tools for resampling MRI NIfTI volumes from 100 micron or any isotropic spacing to a new micron spacing.
 
 ## Installation
 
@@ -18,21 +18,83 @@ pip install numpy nibabel scipy matplotlib SimpleITK --break-system-packages
 
 ### Command Line Usage
 
+**Basic Examples:**
+
 ```bash
-# Basic usage with default settings (linear interpolation, 150 micron z-spacing)
-python resample_nifti.py input.nii.gz output.nii.gz
+# Change only z-spacing to 150 microns (keeps x,y at original spacing)
+python resample_nifti.py input.nii.gz output.nii.gz --z-spacing 0.15
 
-# With custom z-spacing (200 microns = 0.2 mm)
-python resample_nifti.py input.nii.gz output.nii.gz --z-spacing 0.20
+# Change multiple axes individually
+python resample_nifti.py input.nii.gz output.nii.gz --x-spacing 0.2 --z-spacing 0.15
 
-# Using cubic interpolation
-python resample_nifti.py input.nii.gz output.nii.gz --order 3
+# Use tuple input to specify all three axes at once
+python resample_nifti.py input.nii.gz output.nii.gz --spacing 0.1 0.1 0.15
+
+# Upsample z-axis to higher resolution (50 microns) with cubic interpolation
+python resample_nifti.py input.nii.gz output.nii.gz --z-spacing 0.05 --order 3
+
+# Make volume isotropic at 200 microns
+python resample_nifti.py input.nii.gz output.nii.gz --spacing 0.2 0.2 0.2
 
 # With comparison statistics
-python resample_nifti.py input.nii.gz output.nii.gz --compare
+python resample_nifti.py input.nii.gz output.nii.gz --z-spacing 0.15 --compare
+```
+
+**Advanced Examples:**
+
+```bash
+# Downsample x and y, upsample z (for highly anisotropic data)
+python resample_nifti.py input.nii.gz output.nii.gz --x-spacing 0.5 --y-spacing 0.5 --z-spacing 0.05
+
+# Convert from anisotropic to isotropic
+python resample_nifti.py aniso.nii.gz iso.nii.gz --spacing 0.15 0.15 0.15 --order 1
 ```
 
 ### Python Script Usage
+
+**Method 1: Individual axis parameters**
+
+```python
+from resample_nifti import resample_nifti_spacing
+
+# Change only z-spacing (x and y keep original spacing)
+resample_nifti_spacing(
+    'input.nii.gz',
+    'output.nii.gz',
+    new_z_spacing=0.15  # 150 microns
+)
+
+# Change x and z
+resample_nifti_spacing(
+    'input.nii.gz',
+    'output.nii.gz',
+    new_x_spacing=0.2,   # 200 microns
+    new_z_spacing=0.15   # 150 microns
+    # y keeps original spacing
+)
+
+# Change all three axes
+resample_nifti_spacing(
+    'input.nii.gz',
+    'output.nii.gz',
+    new_x_spacing=0.15,
+    new_y_spacing=0.15,
+    new_z_spacing=0.2
+)
+```
+
+**Method 2: Tuple input**
+
+```python
+# Specify all axes at once as (x, y, z) tuple
+resample_nifti_spacing(
+    'input.nii.gz',
+    'output.nii.gz',
+    new_spacing=(0.1, 0.1, 0.15)  # 100x100x150 microns
+)
+```
+
+**Method 3: Low-level approach (for custom workflows)**
 
 ```python
 import nibabel as nib
@@ -44,19 +106,26 @@ img = nib.load('your_volume.nii.gz')
 data = img.get_fdata()
 affine = img.affine
 
-# Get current spacing
-current_spacing = np.abs(affine.diagonal()[:3])
+# Get current spacing (handles rotation properly!)
+current_spacing = np.sqrt(np.sum(affine[:3, :3] ** 2, axis=0))
 
-# Calculate zoom factor (original/new)
-new_z_spacing = 0.15  # 150 microns in mm
-zoom_factors = [1.0, 1.0, current_spacing[2] / new_z_spacing]
+# Set target spacing
+target_spacing = np.array([0.1, 0.1, 0.15])  # x, y, z in mm
+
+# Calculate zoom factors (original/new)
+zoom_factors = current_spacing / target_spacing
 
 # Resample (order=1 for linear interpolation)
 resampled_data = zoom(data, zoom_factors, order=1, mode='nearest')
 
-# Update affine matrix
+# Update affine matrix (important for rotated volumes!)
 new_affine = affine.copy()
-new_affine[2, 2] = new_z_spacing if affine[2, 2] > 0 else -new_z_spacing
+for i in range(3):
+    col_vector = affine[:3, i]
+    current_magnitude = np.sqrt(np.sum(col_vector ** 2))
+    if current_magnitude > 0:
+        scale_factor = target_spacing[i] / current_magnitude
+        new_affine[:3, i] = col_vector * scale_factor
 
 # Save
 resampled_img = nib.Nifti1Image(resampled_data, new_affine)
@@ -78,6 +147,29 @@ The interpolation order parameter controls how new voxel values are calculated:
 
 ## Understanding the Transform
 
+### Extracting Spacing from Affine Matrix
+
+**Important**: The voxel spacing is **not** simply the diagonal of the affine matrix when there's rotation. You must calculate the magnitude of each column vector:
+
+```python
+# WRONG method - only works for axis-aligned volumes
+wrong_spacing = np.abs(affine.diagonal()[:3])
+
+# CORRECT method - handles rotation properly
+correct_spacing = np.sqrt(np.sum(affine[:3, :3] ** 2, axis=0))
+```
+
+For example, with this affine matrix:
+```
+[[-0.01045284  0.          0.09945219 -2.93459034]
+ [ 0.         -0.1         0.          8.        ]
+ [ 0.09945219  0.          0.01045284 -5.08460236]
+ [ 0.          0.          0.          1.        ]]
+```
+
+- Wrong method gives: [10.5, 100.0, 10.5] μm
+- Correct method gives: [100.0, 100.0, 100.0] μm ✓
+
 ### What's Happening
 
 When resampling from 100μm isotropic to 100×100×150μm:
@@ -88,6 +180,20 @@ This means:
 - Number of slices reduces by ~33%
 - File size reduces by ~33%
 - Z-direction resolution decreases from 100μm to 150μm
+
+**General Case - Multi-Axis Resampling:**
+
+The script can resample any combination of axes:
+- **Downsampling** (zoom < 1): Reduces resolution, smaller file
+- **Upsampling** (zoom > 1): Increases resolution, larger file  
+- **Mixed**: Different operations per axis (e.g., downsample x,y but upsample z)
+
+Examples:
+```
+100μm iso → 200×100×150μm:  zoom = (0.5, 1.0, 0.667)  # x down, y same, z down
+100μm iso → 50×50×100μm:    zoom = (2.0, 2.0, 1.0)    # x,y up, z same
+150×150×100μm → 100μm iso:  zoom = (1.5, 1.5, 1.0)    # make isotropic
+```
 
 ### Effects on Data Quality
 
@@ -110,7 +216,7 @@ This means:
 
 ```
 .
-├── resample_nifti.py           # Main command-line script
+├── resample_nifti.py          # Main command-line script
 ├── nifti_resampling_demo.ipynb # Interactive Jupyter notebook
 ├── requirements.txt            # Python dependencies
 └── README.md                   # This file
@@ -123,21 +229,34 @@ positional arguments:
   input                 Input NIfTI file path
   output                Output NIfTI file path
 
+spacing arguments (mutually exclusive groups):
+  --spacing X Y Z       New spacing as three values in mm (e.g., 0.1 0.1 0.15)
+  --xyz-spacing X Y Z   Alternative syntax for --spacing
+  
+  OR use individual axes (can be combined):
+  --x-spacing X         New x-spacing in mm (keeps original if not specified)
+  --y-spacing Y         New y-spacing in mm (keeps original if not specified)
+  --z-spacing Z         New z-spacing in mm (keeps original if not specified)
+
 optional arguments:
-  -h, --help            show this help message and exit
-  --z-spacing Z_SPACING
-                        New z-spacing in mm (default: 0.15 = 150 microns)
+  -h, --help            Show this help message and exit
   --order {0,1,2,3}     Interpolation order:
                         0=nearest, 1=linear (default), 2=quadratic, 3=cubic
   --compare             Compare original and resampled volumes
   --quiet               Suppress verbose output
 ```
 
+**Important Notes:**
+- You can use either `--spacing X Y Z` for all axes, OR individual `--x-spacing`, `--y-spacing`, `--z-spacing`
+- If using individual parameters, unspecified axes keep their original spacing
+- Spacing values are in millimeters (mm): 0.1 mm = 100 microns, 0.15 mm = 150 microns
+- The script correctly handles rotated affine matrices
+
 ## Examples
 
-### Example 1: Standard Resampling
+### Example 1: Standard Resampling (Single Axis)
 ```bash
-python resample_nifti.py brain_100um.nii.gz brain_150um.nii.gz
+python resample_nifti.py brain_100um.nii.gz brain_150um.nii.gz --z-spacing 0.15
 ```
 
 Output:
@@ -145,36 +264,69 @@ Output:
 Loading NIfTI file: brain_100um.nii.gz
 
 Original volume shape: (512, 512, 300)
-Original spacing (mm): x=0.100, y=0.100, z=0.100
-Original spacing (μm): x=100.0, y=100.0, z=100.0
+Original spacing (mm): x=0.1000, y=0.1000, z=0.1000
+Original spacing (μm): x=100.00, y=100.00, z=100.00
 
-Target z-spacing: 150.0 μm (0.150 mm)
-Zoom factors: x=1.000, y=1.000, z=0.667
+Changing spacing: z=0.15
+
+Target spacing (mm): x=0.1000, y=0.1000, z=0.1500
+Target spacing (μm): x=100.00, y=100.00, z=150.00
+
+Zoom factors: x=1.0000, y=1.0000, z=0.6667
+  x-axis: No change
+  y-axis: No change
+  z-axis: Downsampling (0.6667x)
+
 Interpolation method: Linear (Trilinear)
 
 Resampling volume...
 Resampled volume shape: (512, 512, 200)
-Size reduction in z: 300 → 200 slices (33.3% reduction)
+  X: 512 → 512 (+0.0%)
+  Y: 512 → 512 (+0.0%)
+  Z: 300 → 200 (-33.3%)
 
-New spacing (mm): x=0.100, y=0.100, z=0.150
-New spacing (μm): x=100.0, y=100.0, z=150.0
+Verified new spacing (mm): x=0.1000, y=0.1000, z=0.1500
+Verified new spacing (μm): x=100.00, y=100.00, z=150.00
 
-Saving resampled volume to: brain_150um.nii.gz
 Done!
 ```
 
-### Example 2: Different Z-spacing with Cubic Interpolation
+### Example 2: Multi-Axis Resampling
 ```bash
-python resample_nifti.py scan.nii.gz scan_200um.nii.gz --z-spacing 0.20 --order 3
+python resample_nifti.py scan.nii.gz scan_aniso.nii.gz --x-spacing 0.2 --z-spacing 0.15
 ```
 
-### Example 3: Batch Processing
+This creates a volume with 200×100×150 μm spacing.
+
+### Example 3: Using Tuple Input
+```bash
+python resample_nifti.py scan.nii.gz scan_iso.nii.gz --spacing 0.15 0.15 0.15
+```
+
+Makes the volume isotropic at 150 μm.
+
+### Example 4: Upsampling for Super-Resolution
+```bash
+python resample_nifti.py scan.nii.gz scan_hires.nii.gz --z-spacing 0.05 --order 3
+```
+
+Upsamples z-axis to 50 μm using cubic interpolation.
+
+### Example 5: Batch Processing
 ```bash
 for file in *_100um.nii.gz; do
     output="${file/_100um/_150um}"
-    python resample_nifti.py "$file" "$output"
+    python resample_nifti.py "$file" "$output" --z-spacing 0.15
 done
 ```
+
+### Example 6: Handling Rotated Volumes
+```bash
+# Works correctly even with oblique acquisitions
+python resample_nifti.py oblique_scan.nii.gz resampled.nii.gz --spacing 0.2 0.2 0.2
+```
+
+The script automatically handles rotation in the affine matrix.
 
 ## Using SimpleITK (Alternative)
 
